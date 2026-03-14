@@ -5,22 +5,20 @@
 .DESCRIPTION
     Creates a weekly scheduled task that runs Clear-TempFolders.ps1
     as SYSTEM with highest privileges.
-    Compatible with both PowerShell 5.1 and PowerShell 7+.
+    Automatically detects and uses the LATEST available PowerShell version
+    (prioritizing PowerShell 7+ over Windows PowerShell 5.1).
 
 .PARAMETER ScriptPath
-    Full path to Clear-TempFolders.ps1.
-    Default: same folder as this script.
+    Full path to Clear-TempFolders.ps1. Default: same folder as this script.
 
 .PARAMETER DaysOld
     Passed to Clear-TempFolders.ps1 as -DaysOld. Default: 7.
 
 .PARAMETER LogPath
-    Passed to Clear-TempFolders.ps1 as -LogPath.
-    Default: C:\Logs\TempClean.log.
+    Passed to Clear-TempFolders.ps1 as -LogPath. Default: C:\Logs\TempClean.log.
 
-.PARAMETER UsePS7
-    If specified, runs via pwsh.exe (PowerShell 7+).
-    Otherwise uses powershell.exe (PowerShell 5.1).
+.PARAMETER PreferPS7
+    Prefer PowerShell 7+ over Windows PowerShell 5.1. Default: $true.
 
 .PARAMETER DayOfWeek
     Day of the week for the task trigger. Default: Sunday.
@@ -33,21 +31,18 @@
 
 .EXAMPLE
     .\Register-TempCleanupTask.ps1
-    Register with defaults (PS 5.1, Sunday 03:00)
+    Auto-detects and uses latest PowerShell (PS 7 if available)
 
 .EXAMPLE
-    .\Register-TempCleanupTask.ps1 -UsePS7 -DayOfWeek Monday -TaskTime "02:00" -DaysOld 7
-    Register for PS 7, Monday 02:00, keep files 7 days
-
-.EXAMPLE
-    .\Register-TempCleanupTask.ps1 -Force
-    Force overwrite without confirmation
+    .\Register-TempCleanupTask.ps1 -DayOfWeek Monday -TaskTime "02:00" -DaysOld 7
+    Custom schedule
 
 .NOTES
     Author    : Mikhail Deynekin
     Email     : mid1977@gmail.com
     Site      : https://deynekin.com
-    Version   : 1.2.0
+    GitHub    : https://github.com/paulmann/Clear-TempFolders
+    Version   : 1.4.0
     Updated   : 2026-03-15
     Requires  : PowerShell 5.1+ | Run as Administrator
     License   : MIT
@@ -66,7 +61,7 @@ param (
     [string] $LogPath = 'C:\Logs\TempClean.log',
 
     [Parameter(Mandatory = $false)]
-    [switch] $UsePS7,
+    [bool] $PreferPS7 = $true,
 
     [Parameter(Mandatory = $false)]
     [ValidateSet('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')]
@@ -83,8 +78,8 @@ param (
 #region ── Initialization ─────────────────────────────────────────────────────
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$taskService = $null
 
-# Color output helper functions
 function Write-LogInfo    { param([string]$Message) Write-Host "[INFO]    $Message" -ForegroundColor Cyan }
 function Write-LogSuccess { param([string]$Message) Write-Host "[OK]      $Message" -ForegroundColor Green }
 function Write-LogWarning { param([string]$Message) Write-Host "[WARNING] $Message" -ForegroundColor Yellow }
@@ -96,17 +91,15 @@ try {
     $currentPrincipal = New-Object Security.Principal.WindowsPrincipal(
         [Security.Principal.WindowsIdentity]::GetCurrent()
     )
-    $isAdmin = $currentPrincipal.IsInRole(
-        [Security.Principal.WindowsBuiltInRole]::Administrator
-    )
+    $isAdmin = $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 } catch {
     Write-LogError "Failed to check administrator privileges: $_"
     exit 1
 }
 
 if (-not $isAdmin) {
-    Write-LogError "Please run as Administrator (elevated PowerShell)."
-    Write-Host "Hint: Right-click PowerShell icon -> 'Run as Administrator'" -ForegroundColor Gray
+    Write-LogError "Please run as Administrator."
+    Write-Host "Hint: Right-click PowerShell -> 'Run as Administrator'" -ForegroundColor Gray
     exit 1
 }
 Write-LogSuccess "Administrator privileges confirmed."
@@ -115,204 +108,247 @@ Write-LogSuccess "Administrator privileges confirmed."
 #region ── Validate Script Path ───────────────────────────────────────────────
 if (-not (Test-Path -Path $ScriptPath -PathType Leaf)) {
     Write-LogError "Script not found: $ScriptPath"
-    Write-Host "Hint: Use -ScriptPath to specify the correct location." -ForegroundColor Gray
     exit 1
 }
 
-try {
-    $ScriptPath = (Resolve-Path -Path $ScriptPath -ErrorAction Stop).Path
-    Write-LogInfo "Script path: $ScriptPath"
-} catch {
-    Write-LogError "Failed to resolve script path: $_"
-    exit 1
+$ScriptPath = (Resolve-Path -Path $ScriptPath).Path
+Write-LogInfo "Script path: $ScriptPath"
+#endregion
+
+#region ── Ensure Log Directory ───────────────────────────────────────────────
+$logDir = Split-Path -Path $LogPath -Parent
+if ($logDir -and -not (Test-Path -Path $logDir)) {
+    try {
+        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+        Write-LogInfo "Created log directory: $logDir"
+    } catch {
+        Write-LogWarning "Could not create log directory: $_"
+    }
 }
 #endregion
 
-#region ── Ensure Log Directory Exists ────────────────────────────────────────
-try {
-    $logDir = Split-Path -Path $LogPath -Parent
-    if ($logDir -and -not (Test-Path -Path $logDir -PathType Container)) {
-        New-Item -ItemType Directory -Path $logDir -Force -ErrorAction Stop | Out-Null
-        Write-LogInfo "Created log directory: $logDir"
+#region ── Find Latest PowerShell ─────────────────────────────────────────────
+function Get-LatestPowerShell {
+    [CmdletBinding()]
+    param([bool]$PreferPS7 = $true)
+    
+    $foundVersions = [System.Collections.Generic.List[PSCustomObject]]::new()
+    
+    Write-Verbose "=== PowerShell Detection Started ==="
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # PRIORITY 1: PowerShell 7+ (pwsh.exe) — SEARCH FIRST
+    # ─────────────────────────────────────────────────────────────────────────
+    if ($PreferPS7) {
+        Write-Verbose "Searching for PowerShell 7+ installations..."
         
-        # Grant SYSTEM full control on log directory
+        # Specific known paths for PowerShell 7+
+        $ps7ExePaths = @(
+            "$env:ProgramFiles\PowerShell\7\pwsh.exe",
+            "$env:ProgramFiles\PowerShell\8\pwsh.exe",
+            "${env:ProgramFiles(x86)}\PowerShell\7\pwsh.exe",
+            "${env:ProgramFiles(x86)}\PowerShell\8\pwsh.exe"
+        )
+        
+        foreach ($pwshPath in $ps7ExePaths) {
+            if (Test-Path -Path $pwshPath -PathType Leaf) {
+                try {
+                    $versionInfo = (Get-Item -Path $pwshPath).VersionInfo
+                    $fileVersion = $versionInfo.FileVersion
+                    
+                    Write-Verbose "Found pwsh.exe: $pwshPath"
+                    Write-Verbose "  FileVersion: $fileVersion"
+                    
+                    # Parse version
+                    if ($fileVersion -match '(\d+)\.(\d+)\.(\d+)') {
+                        $ver = [version]::new($matches[1], $matches[2], $matches[3])
+                    } else {
+                        # Extract from folder name
+                        $folderName = Split-Path (Split-Path $pwshPath -Parent) -Leaf
+                        if ($folderName -match '^(\d+)') {
+                            $ver = [version]::new([int]$matches[1], 0, 0)
+                        } else {
+                            $ver = [version]'7.0.0'
+                        }
+                    }
+                    
+                    $foundVersions.Add([PSCustomObject]@{
+                        Path    = $pwshPath
+                        Version = $ver
+                        Name    = "PowerShell $ver"
+                        Type    = 'pwsh'
+                        Score   = (1000 + $ver.Major)  # High priority
+                    })
+                    
+                    Write-Verbose "  Registered: PowerShell $ver (Score: $(1000 + $ver.Major))"
+                } catch {
+                    Write-Verbose "  Error reading version: $_"
+                }
+            }
+        }
+        
+        # Also check via Get-Command pwsh
         try {
-            $acl = Get-Acl -Path $logDir
-            $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-                'NT AUTHORITY\SYSTEM',
-                'FullControl',
-                'ContainerInherit,ObjectInherit',
-                'None',
-                'Allow'
-            )
-            $acl.SetAccessRule($systemRule)
-            Set-Acl -Path $logDir -AclObject $acl
-            Write-LogInfo "Granted SYSTEM full control on $logDir"
+            $pwshCmd = Get-Command -Name pwsh -ErrorAction SilentlyContinue
+            if ($pwshCmd -and $pwshCmd.Source -and (Test-Path -Path $pwshCmd.Source -PathType Leaf)) {
+                $pwshPath = $pwshCmd.Source
+                
+                # Check if already in list
+                $alreadyFound = $foundVersions | Where-Object { $_.Path -eq $pwshPath }
+                if (-not $alreadyFound) {
+                    try {
+                        $versionInfo = (Get-Item -Path $pwshPath).VersionInfo
+                        $fileVersion = $versionInfo.FileVersion
+                        
+                        Write-Verbose "Found pwsh.exe via PATH: $pwshPath"
+                        Write-Verbose "  FileVersion: $fileVersion"
+                        
+                        if ($fileVersion -match '(\d+)\.(\d+)\.(\d+)') {
+                            $ver = [version]::new($matches[1], $matches[2], $matches[3])
+                            
+                            $foundVersions.Add([PSCustomObject]@{
+                                Path    = $pwshPath
+                                Version = $ver
+                                Name    = "PowerShell $ver"
+                                Type    = 'pwsh'
+                                Score   = 1000 + $ver.Major
+                            })
+                            
+                            Write-Verbose "  Registered: PowerShell $ver (Score: $($1000 + $ver.Major))"
+                        }
+                    } catch {
+                        Write-Verbose "  Error reading PATH pwsh version: $_"
+                    }
+                }
+            }
         } catch {
-            Write-LogWarning "Could not set ACL on log directory (will be created by cleanup script): $_"
+            Write-Verbose "Could not check pwsh in PATH: $_"
         }
     }
-} catch {
-    Write-LogWarning "Could not create log directory: $logDir (will be created by cleanup script)"
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # PRIORITY 2: Windows PowerShell 5.1 (powershell.exe) — FALLBACK
+    # ─────────────────────────────────────────────────────────────────────────
+    Write-Verbose "Searching for Windows PowerShell 5.1..."
+    
+    $ps51Path = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+    if (Test-Path -Path $ps51Path -PathType Leaf) {
+        try {
+            $versionInfo = (Get-Item -Path $ps51Path).VersionInfo
+            $fileVersion = $versionInfo.FileVersion
+            
+            Write-Verbose "Found powershell.exe: $ps51Path"
+            Write-Verbose "  FileVersion: $fileVersion"
+            
+            if ($fileVersion -match '(\d+)\.(\d+)\.(\d+)') {
+                $ver = [version]::new($matches[1], $matches[2], $matches[3])
+            } else {
+                $ver = [version]'5.1.0'
+            }
+            
+            $foundVersions.Add([PSCustomObject]@{
+                Path    = $ps51Path
+                Version = $ver
+                Name    = "Windows PowerShell $ver"
+                Type    = 'powershell'
+                Score   = (100 + $ver.Major)  # Lower priority than pwsh
+            })
+            
+            Write-Verbose "  Registered: Windows PowerShell $ver (Score: $(100 + $ver.Major))"
+        } catch {
+            Write-Verbose "  Error reading PS 5.1 version: $_"
+        }
+    }
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # Return highest priority version
+    # ─────────────────────────────────────────────────────────────────────────
+    Write-Verbose "=== Found $($foundVersions.Count) PowerShell installation(s) ==="
+    
+    if ($foundVersions.Count -eq 0) {
+        Write-Verbose "ERROR: No PowerShell installations found!"
+        return $null
+    }
+    
+    # Sort by Score (descending), then Version (descending)
+    $latest = $foundVersions | 
+              Sort-Object -Property @{Expression={$_.Score}; Descending=$true}, 
+                                    @{Expression={$_.Version}; Descending=$true} |
+              Select-Object -First 1
+    
+    Write-Verbose "=== Selected: $($latest.Name) at $($latest.Path) ==="
+    
+    return $latest
 }
+
+Write-LogInfo "Detecting latest PowerShell version..."
+$psInfo = Get-LatestPowerShell -PreferPS7 $PreferPS7 -Verbose
+
+if (-not $psInfo) {
+    Write-LogError "No PowerShell installation found."
+    Write-Host "Install PowerShell 7 from: https://aka.ms/powershell" -ForegroundColor Gray
+    exit 1
+}
+
+$exe = $psInfo.Path
+Write-LogSuccess "Selected: $($psInfo.Name)"
+Write-LogInfo "Path: $exe"
+Write-LogInfo "Type: $($psInfo.Type)"
 #endregion
 
-#region ── Resolve PowerShell Executable ──────────────────────────────────────
-if ($UsePS7) {
-    Write-LogInfo "PowerShell 7+ mode requested (-UsePS7)"
-    
-    $ps7Candidates = @(
-        (Get-Command -Name pwsh -ErrorAction SilentlyContinue).Source,
-        "$env:ProgramFiles\PowerShell\7\pwsh.exe",
-        "$env:ProgramFiles\PowerShell\8\pwsh.exe",
-        "${env:ProgramFiles(x86)}\PowerShell\7\pwsh.exe",
-        "${env:ProgramFiles(x86)}\PowerShell\8\pwsh.exe",
-        "$env:LOCALAPPDATA\Microsoft\WindowsApps\pwsh.exe"
-    )
-    
-    $exe = $ps7Candidates | 
-        Where-Object { $_ -and (Test-Path -Path $_ -PathType Leaf) } | 
-        Select-Object -First 1
-    
-    if (-not $exe) {
-        Write-LogError "PowerShell 7+ (pwsh.exe) not found."
-        Write-Host "Hint: Install from https://aka.ms/powershell or run without -UsePS7" -ForegroundColor Gray
-        exit 1
-    }
-    Write-LogSuccess "PowerShell 7+ found: $exe"
-} else {
-    $exe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-    if (-not (Test-Path -Path $exe -PathType Leaf)) {
-        Write-LogError "PowerShell 5.1 not found: $exe"
-        exit 1
-    }
-    Write-LogSuccess "PowerShell 5.1 found: $exe"
-}
-#endregion
-
-#region ── Build Task Components ──────────────────────────────────────────────
+#region ── Build Task ─────────────────────────────────────────────────────────
 $taskName   = 'Clear-TempFolders'
 $taskFolder = '\Maintenance'
-
-# Build argument list with proper quoting for paths containing spaces
-$arguments = @(
-    '-NonInteractive'
-    '-NoProfile'
-    '-ExecutionPolicy'
-    'Bypass'
-    '-File'
-    "`"$ScriptPath`""
-    '-DaysOld'
-    $DaysOld
-    '-LogPath'
-    "`"$LogPath`""
-) -join ' '
+$arguments  = "-NonInteractive -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" -DaysOld $DaysOld -LogPath `"$LogPath`""
 
 Write-LogInfo "Task arguments: $arguments"
 
-try {
-    $action = New-ScheduledTaskAction -Execute $exe -Argument $arguments -ErrorAction Stop
-} catch {
-    Write-LogError "Failed to create scheduled task action: $_"
-    exit 1
-}
-
-try {
-    $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $DayOfWeek -At $TaskTime -ErrorAction Stop
-} catch {
-    Write-LogError "Failed to create scheduled task trigger: $_"
-    exit 1
-}
-
-$settings = New-ScheduledTaskSettingsSet `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 4) `
-    -MultipleInstances IgnoreNew `
-    -StartWhenAvailable `
-    -RunOnlyIfNetworkAvailable:$false `
-    -AllowStartIfOnBatteries `
-    -DontStopIfGoingOnBatteries `
-    -WakeToRun:$false `
-    -Hidden:$false `
-    -RestartCount 3 `
-    -RestartInterval (New-TimeSpan -Minutes 1)
-
-$principal = New-ScheduledTaskPrincipal `
-    -UserId 'SYSTEM' `
-    -RunLevel Highest `
-    -LogonType ServiceAccount
+$action     = New-ScheduledTaskAction -Execute $exe -Argument $arguments
+$trigger    = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $DayOfWeek -At $TaskTime
+$settings   = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 4) -MultipleInstances IgnoreNew -StartWhenAvailable
+$principal  = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest -LogonType ServiceAccount
 #endregion
 
-#region ── Ensure Task Folder Exists (COM approach) ───────────────────────────
-function New-TaskFolder {
-    param([string]$Path)
-    
-    $taskService = $null
-    try {
-        $taskService = New-Object -ComObject 'Schedule.Service'
-        $taskService.Connect()
-        
-        $rootFolder = $taskService.GetFolder('\')
-        $folderName = $Path.TrimStart('\')
-        
-        # Check if folder already exists
-        try {
-            $null = $taskService.GetFolder($Path)
-            return $true  # Folder exists
-        } catch {
-            # Folder doesn't exist, create it
-            try {
-                $null = $rootFolder.CreateFolder($folderName)
-                return $true
-            } catch {
-                Write-LogError "Failed to create task folder '$Path': $_"
-                return $false
-            }
-        }
-    } catch {
-        Write-LogError "Failed to connect to Task Scheduler service: $_"
-        return $false
-    } finally {
-        if ($taskService) {
-            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($taskService) | Out-Null
-            [System.GC]::Collect()
-            [System.GC]::WaitForPendingFinalizers()
-        }
+#region ── Ensure Task Folder ─────────────────────────────────────────────────
+$taskService = New-Object -ComObject 'Schedule.Service'
+try	{
+		$taskService.Connect()
+	} catch {
+		$null = $taskService.GetFolder('\').CreateFolder($taskFolder.TrimStart('\'))
+		Write-LogInfo "Created task folder: $taskFolder"
+	}
+finally {
+    if ($taskService) {
+	$null = [System.Runtime.InteropServices.Marshal]::ReleaseComObject($taskService)
     }
+    [System.GC]::Collect()
+    [System.GC]::WaitForPendingFinalizers()
 }
-
-if (-not (New-TaskFolder -Path $taskFolder)) {
-    Write-LogError "Failed to ensure task folder exists: $taskFolder"
-    exit 1
-}
-Write-LogInfo "Task folder confirmed: $taskFolder"
 #endregion
 
 #region ── Check Existing Task ────────────────────────────────────────────────
 $existingTask = Get-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue
-$taskExists = $null -ne $existingTask
 
-if ($taskExists) {
+if ($existingTask -and -not $Force) {
     Write-LogWarning "Task already exists: $taskFolder$taskName"
-    
-    if (-not $Force -and -not $PSCmdlet.ShouldProcess(
-            "$taskFolder$taskName", 
-            'Overwrite existing scheduled task'
-        )) {
-        Write-LogInfo "Operation cancelled by user."
+    if (-not $PSCmdlet.ShouldProcess("$taskFolder$taskName", 'Overwrite existing task')) {
+        Write-LogInfo "Cancelled by user."
         exit 0
     }
-    Write-LogInfo "Force overwrite enabled."
 }
 #endregion
 
 #region ── Register Task ──────────────────────────────────────────────────────
 if ($PSCmdlet.ShouldProcess("$taskFolder$taskName", 'Register-ScheduledTask')) {
-    try {
-        $description = "Weekly cleanup of Windows TEMP folders. " +
-                       "Author: Mikhail Deynekin | https://deynekin.com | " +
-                       "Runs as SYSTEM with highest privileges. " +
-                       "Removes files older than $DaysOld days."
+    $description = "Weekly cleanup of Windows TEMP folders. " +
+                   "Author: Mikhail Deynekin | https://deynekin.com | " +
+                   "Removes files older than $DaysOld days."
+    $action     = New-ScheduledTaskAction -Execute $exe -Argument $arguments
+    $trigger    = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $DayOfWeek -At $TaskTime
+    $settings   = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 4) -MultipleInstances IgnoreNew -StartWhenAvailable
+    $principal  = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest -LogonType ServiceAccount    
 
+    try {
         Register-ScheduledTask `
             -TaskName $taskName `
             -TaskPath $taskFolder `
@@ -323,19 +359,40 @@ if ($PSCmdlet.ShouldProcess("$taskFolder$taskName", 'Register-ScheduledTask')) {
             -Description $description `
             -Force `
             -ErrorAction Stop | Out-Null
-
-        Write-LogSuccess "Task registered successfully!"
         
-        # Display summary
+        Write-LogSuccess "Task registered successfully!"
         Write-Host ""
-        Write-Host "═══════════════════════════════════════════════════════════" -ForegroundColor DarkGray
+        Write-Host "================================================================" -ForegroundColor DarkGray
         Write-Host "  TASK SUMMARY" -ForegroundColor White
-        Write-Host "═══════════════════════════════════════════════════════════" -ForegroundColor DarkGray
-        Write-Host "  Task Name : $taskFolder$taskName" -ForegroundColor White
-        Write-Host "  Engine    : $(Split-Path $exe -Leaf) ($exe)" -ForegroundColor Gray
-        Write-Host "  Schedule  : Every $DayOfWeek at $TaskTime" -ForegroundColor White
-        Write-Host "  Retention : Files older than $DaysOld days" -ForegroundColor White
-        Write-Host "  Log Path  : $LogPath" -ForegroundColor Gray
-        Write-Host "  PS Version: $(if ($UsePS7) { 'PowerShell 7+' } else { 'PowerShell 5.1' })" -ForegroundColor White
-        Write-Host "  Run As    : SYSTEM (highest privileges)" -ForegroundColor Gray
-        Write-Host "═══════════════════
+        Write-Host "================================================================" -ForegroundColor DarkGray
+        Write-Host "  Task     : $taskFolder$taskName" -ForegroundColor White
+        Write-Host "  Engine   : $($psInfo.Name)" -ForegroundColor White
+        Write-Host "  Path     : $exe" -ForegroundColor Gray
+        Write-Host "  Schedule : Every $DayOfWeek at $TaskTime" -ForegroundColor White
+        Write-Host "  Retention: Files older than $DaysOld days" -ForegroundColor White
+        Write-Host "  Log      : $LogPath" -ForegroundColor Gray
+        Write-Host "================================================================" -ForegroundColor DarkGray
+        Write-Host ""
+        Write-Host "USEFUL COMMANDS:" -ForegroundColor Cyan
+        Write-Host "  Verify : Get-ScheduledTask -TaskName '$taskName' -TaskPath '$taskFolder'" -ForegroundColor Gray
+        Write-Host "  Run now: Start-ScheduledTask -TaskName '$taskName' -TaskPath '$taskFolder'" -ForegroundColor Gray
+        Write-Host "  Remove : Unregister-ScheduledTask -TaskName '$taskName' -TaskPath '$taskFolder' -Confirm:`$false" -ForegroundColor Gray
+        Write-Host ""
+        
+    } catch {
+        Write-LogError "Failed to register task: $_"
+        Write-Host ""
+        Write-Host "TROUBLESHOOTING:" -ForegroundColor Yellow
+        Write-Host "  1. Check Task Scheduler service is running" -ForegroundColor Gray
+        Write-Host "  2. Review Event Viewer -> Task Scheduler logs" -ForegroundColor Gray
+        Write-Host "  3. Try running with -Verbose for details" -ForegroundColor Gray
+        Write-Host ""
+        exit 1
+    }
+}
+#endregion
+
+#region ── Exit ───────────────────────────────────────────────────────────────
+Write-LogSuccess "Script completed successfully."
+exit 0
+#endregion
