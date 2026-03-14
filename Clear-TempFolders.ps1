@@ -63,9 +63,9 @@
 .NOTES
     Author    : Mikhail Deynekin
     Email     : mid1977@gmail.com
-    Site      : https://deynekin.com
-    GitHub    : https://github.com/paulmann/Clear-TempFolders
-    Version   : 2.1.0
+    Site      : https://deynekin.com  
+    GitHub    : https://github.com/paulmann/Clear-TempFolders  
+    Version   : 2.1.2
     Updated   : 2026-03-15
     Requires  : PowerShell 5.1+ | Run as Administrator
     License   : MIT
@@ -122,10 +122,6 @@ $script:supportsDepth = $PSVersionTable.PSVersion.Major -ge 5 -and
 
 #region ── Helper Functions ───────────────────────────────────────────────────
 function Format-FileSize {
-    <#
-    .SYNOPSIS
-        Formats byte count into human-readable size
-    #>
     [CmdletBinding()]
     [OutputType([string])]
     param(
@@ -142,10 +138,6 @@ function Format-FileSize {
 }
 
 function Write-ColorOutput {
-    <#
-    .SYNOPSIS
-        Writes colored output to console and optionally to log
-    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -161,19 +153,16 @@ function Write-ColorOutput {
     
     Write-Host $Message -ForegroundColor $ForegroundColor
     
-    if (-not $NoLog -and $script:LogPath) {
+    if (-not $NoLog -and $script:LogPath -and -not [string]::IsNullOrWhiteSpace($Message)) {
         Write-LogMessage -Message $Message -Level 'OUTPUT'
     }
 }
 
 function Write-LogMessage {
-    <#
-    .SYNOPSIS
-        Writes timestamped message to log file
-    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
+        [AllowEmptyString()]
         [string] $Message,
         
         [Parameter(Mandatory = $false)]
@@ -182,12 +171,12 @@ function Write-LogMessage {
     )
     
     if (-not $script:LogPath) { return }
+    if ([string]::IsNullOrWhiteSpace($Message)) { return }
     
     try {
         $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
         $logLine = "[$timestamp] [$Level] $Message"
         
-        # Ensure log directory exists
         $logDir = Split-Path -Path $script:LogPath -Parent
         if ($logDir -and -not (Test-Path -Path $logDir -PathType Container)) {
             $null = New-Item -ItemType Directory -Path $logDir -Force -ErrorAction Stop
@@ -195,16 +184,11 @@ function Write-LogMessage {
         
         $logLine | Out-File -FilePath $script:LogPath -Append -Encoding UTF8 -ErrorAction Stop
     } catch {
-        # Silently ignore logging errors to not interrupt cleanup
         Write-Verbose "Failed to write to log: $_"
     }
 }
 
 function Test-PathExcluded {
-    <#
-    .SYNOPSIS
-        Tests if a file path matches any exclusion pattern
-    #>
     [CmdletBinding()]
     [OutputType([bool])]
     param(
@@ -231,10 +215,6 @@ function Test-PathExcluded {
 }
 
 function Get-RelativePath {
-    <#
-    .SYNOPSIS
-        Returns relative path from base path
-    #>
     [CmdletBinding()]
     [OutputType([string])]
     param(
@@ -245,23 +225,19 @@ function Get-RelativePath {
         [string] $BasePath
     )
     
-    # Normalize paths
     $FullPath = $FullPath.TrimEnd('\')
     $BasePath = $BasePath.TrimEnd('\')
     
     if ($FullPath.StartsWith($BasePath, [StringComparison]::OrdinalIgnoreCase)) {
         $relative = $FullPath.Substring($BasePath.Length).TrimStart('\')
-        return if ($relative) { $relative } else { '.' }
+        # ✅ FIX: Proper if-expression syntax for return
+        return $(if ($relative) { $relative } else { '.' })
     }
     
     return $FullPath
 }
 
 function Test-IsJunctionOrSymlink {
-    <#
-    .SYNOPSIS
-        Tests if path is a junction point or symbolic link
-    #>
     [CmdletBinding()]
     [OutputType([bool])]
     param(
@@ -278,10 +254,6 @@ function Test-IsJunctionOrSymlink {
 }
 
 function Get-FilesRecursive {
-    <#
-    .SYNOPSIS
-        Gets files recursively with optional depth limit
-    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -305,7 +277,6 @@ function Get-FilesRecursive {
         ErrorAction = 'SilentlyContinue'
     }
     
-    # Only add -Depth if supported AND MaxDepth > 0
     if ($script:supportsDepth -and $MaxDepth -gt 0) {
         $getChildItemParams.Depth = $MaxDepth
     }
@@ -321,10 +292,6 @@ function Get-FilesRecursive {
 }
 
 function Get-DirectoriesRecursive {
-    <#
-    .SYNOPSIS
-        Gets directories recursively with optional depth limit, sorted deepest-first
-    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -361,7 +328,7 @@ if ($DaysOld -le 0) {
 }
 
 if ($LogPath) {
-    $script:LogPath = $LogPath  # Store in script scope
+    $script:LogPath = $LogPath
     try {
         $logDir = Split-Path -Path $LogPath -Parent
         if ($logDir -and -not (Test-Path -Path $logDir -PathType Container)) {
@@ -376,7 +343,6 @@ if ($LogPath) {
     $script:LogPath = ''
 }
 
-# Warn if MaxDepth specified but not supported
 if ($MaxDepth -gt 0 -and -not $script:supportsDepth) {
     Write-ColorOutput "[WARNING] -MaxDepth requires PowerShell 5.1+. Will scan all depths." -ForegroundColor Yellow
     Write-LogMessage "MaxDepth not supported in PS $($PSVersionTable.PSVersion), ignoring" -Level 'WARNING'
@@ -384,10 +350,201 @@ if ($MaxDepth -gt 0 -and -not $script:supportsDepth) {
 #endregion
 
 #region ── Header Display ─────────────────────────────────────────────────────
-$modeLabel = if ($DryRun) { '  ·  DRY RUN - no files will be deleted  ' } else { '' }
-$version   = 'v2.1.0'
+$modeLabel = if ($DryRun) { '· DRY RUN · ' } else { '' }
+$version   = 'v2.1.2'
 $width     = 70
 
+$borderTop    = '╔' + ('═' * $width) + '╗'
+$borderMiddle = '╠' + ('═' * $width) + '╣'
+$borderBottom = '╚' + ('═' * $width) + '╝'
+
+$titleText = "CLEAR-TEMP-FOLDERS  $modeLabel$version"
+$titlePadding = ' ' * [Math]::Max(0, $width - $titleText.Length - 2)
+$titleLine = "║  $titleText$titlePadding║"
+
+$daysText = "Cleaning TEMP folders older than $DaysOld day(s)..."
+$daysPadding = ' ' * [Math]::Max(0, $width - $daysText.Length - 2)
+$daysLine = "║  $daysText$daysPadding║"
+
+$targetText = if ($ExcludeUserTemp) { 'Windows\Temp only' } else { 'System + User TEMP folders' }
+$targetFull = "Target: $targetText"
+$targetPadding = ' ' * [Math]::Max(0, $width - $targetFull.Length - 2)
+$targetLine = "║  $targetFull$targetPadding║"
+
 Write-ColorOutput ''
-Write-ColorOutput ('╔' + ('═' * $width) + '╗') -ForegroundColor Cyan
-Write-ColorOutput ('║  CLEAR-TEMP-FOLDERS  {0}{1}
+Write-ColorOutput $borderTop -ForegroundColor Cyan
+Write-ColorOutput $titleLine -ForegroundColor Cyan
+Write-ColorOutput $borderMiddle -ForegroundColor Cyan
+Write-ColorOutput $daysLine -ForegroundColor Gray
+Write-ColorOutput $targetLine -ForegroundColor Gray
+Write-ColorOutput $borderBottom -ForegroundColor Cyan
+Write-ColorOutput ''
+#endregion
+
+#region ── Main Cleanup Logic ─────────────────────────────────────────────────
+$thresholdDate = (Get-Date).AddDays(-$DaysOld)
+$windowsTemp = "$env:windir\Temp"
+$userTempRoot = "$env:USERPROFILE\AppData\Local\Temp"
+
+$targetDirs = @()
+if (Test-Path -Path $windowsTemp -PathType Container) {
+    $targetDirs += $windowsTemp
+}
+
+if (-not $ExcludeUserTemp) {
+    $userTemps = Get-ChildItem -Path "$env:SystemDrive\Users" -Directory -Force -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Name -notmatch '^(Public|Default|Default User|All Users)$' } |
+                 ForEach-Object { "$($_.FullName)\AppData\Local\Temp" } |
+                 Where-Object { Test-Path -Path $_ -PathType Container }
+    $targetDirs += $userTemps
+}
+
+Write-LogMessage "Starting cleanup: DaysOld=$DaysOld, DryRun=$DryRun, Targets=$($targetDirs.Count)" -Level 'INFO'
+
+foreach ($tempPath in $targetDirs) {
+    Write-ColorOutput "`n[SCAN] Processing: $tempPath" -ForegroundColor Cyan -NoLog:$Quiet
+    
+    $files = Get-FilesRecursive -Path $tempPath -MaxDepth $MaxDepth -OlderThan $thresholdDate -ExcludePatterns $ExcludePatterns
+    
+    foreach ($file in $files) {
+        $relativePath = Get-RelativePath -FullPath $file.FullName -BasePath $tempPath
+        $size = Format-FileSize -Bytes $file.Length
+        
+        if ($DryRun -or $WhatIfPreference) {
+            if (-not $Quiet) {
+                Write-ColorOutput "  [DRY] Would delete: $relativePath ($size)" -ForegroundColor Yellow
+            }
+            $script:cntFiles++
+            $script:totalBytes += $file.Length
+        }
+        else {
+            if ($PSCmdlet.ShouldProcess($file.FullName, 'Delete file')) {
+                try {
+                    Remove-Item -Path $file.FullName -Force -ErrorAction Stop
+                    if (-not $Quiet) {
+                        Write-ColorOutput "  [DEL] Deleted: $relativePath ($size)" -ForegroundColor Green
+                    }
+                    $script:cntFiles++
+                    $script:totalBytes += $file.Length
+                    Write-LogMessage "Deleted: $($file.FullName) ($size)" -Level 'INFO'
+                }
+                catch [System.IO.IOException] {
+                    # File locked/in-use - expected for some system temp files
+                    if (-not $Quiet) {
+                        Write-ColorOutput "  [SKIP] In use: $relativePath" -ForegroundColor DarkYellow
+                    }
+                    $script:cntSkipped++
+                    Write-LogMessage "Skipped (in use): $($file.FullName)" -Level 'WARNING'
+                }
+                catch [System.UnauthorizedAccessException] {
+                    # Access denied - expected for protected files
+                    if (-not $Quiet) {
+                        Write-ColorOutput "  [SKIP] Access denied: $relativePath" -ForegroundColor DarkYellow
+                    }
+                    $script:cntSkipped++
+                    Write-LogMessage "Skipped (access denied): $($file.FullName)" -Level 'WARNING'
+                }
+                catch {
+                    # Unexpected error
+                    if (-not $Quiet) {
+                        Write-ColorOutput "  [ERR] Failed: $relativePath - $($_.Exception.Message)" -ForegroundColor Red
+                    }
+                    $script:cntSkipped++
+                    Write-LogMessage "Failed to delete: $($file.FullName) - $($_.Exception.Message)" -Level 'ERROR'
+                }
+            }
+            else {
+                $script:cntSkipped++
+            }
+        }
+    }
+    
+    # Remove empty directories (deepest first)
+    $emptyDirs = Get-DirectoriesRecursive -Path $tempPath -MaxDepth $MaxDepth |
+                 Where-Object { 
+                     # ✅ FIX: Use @() to ensure .Count works on single items or $null
+                     $items = Get-ChildItem -Path $_.FullName -Force -ErrorAction SilentlyContinue
+                     $null -eq $items -or @($items).Count -eq 0
+                 }
+    
+    foreach ($dir in $emptyDirs) {
+        $relativePath = Get-RelativePath -FullPath $dir.FullName -BasePath $tempPath
+        
+        if ($DryRun -or $WhatIfPreference) {
+            if (-not $Quiet) {
+                Write-ColorOutput "  [DRY] Would remove empty dir: $relativePath" -ForegroundColor Yellow
+            }
+            $script:cntDirs++
+        }
+        else {
+            if ($PSCmdlet.ShouldProcess($dir.FullName, 'Remove empty directory')) {
+                try {
+                    Remove-Item -Path $dir.FullName -Force -ErrorAction Stop
+                    if (-not $Quiet) {
+                        Write-ColorOutput "  [DEL] Removed empty dir: $relativePath" -ForegroundColor Green
+                    }
+                    $script:cntDirs++
+                    Write-LogMessage "Removed empty directory: $($dir.FullName)" -Level 'INFO'
+                }
+                catch [System.IO.IOException] {
+                    if (-not $Quiet) {
+                        Write-ColorOutput "  [SKIP] Dir in use: $relativePath" -ForegroundColor DarkYellow
+                    }
+                    $script:cntDirsSkipped++
+                    Write-LogMessage "Skipped dir (in use): $($dir.FullName)" -Level 'WARNING'
+                }
+                catch [System.UnauthorizedAccessException] {
+                    if (-not $Quiet) {
+                        Write-ColorOutput "  [SKIP] Access denied: $relativePath" -ForegroundColor DarkYellow
+                    }
+                    $script:cntDirsSkipped++
+                    Write-LogMessage "Skipped dir (access denied): $($dir.FullName)" -Level 'WARNING'
+                }
+                catch {
+                    if (-not $Quiet) {
+                        Write-ColorOutput "  [ERR] Failed to remove dir: $relativePath - $($_.Exception.Message)" -ForegroundColor Red
+                    }
+                    $script:cntDirsSkipped++
+                    Write-LogMessage "Failed to remove directory: $($dir.FullName) - $($_.Exception.Message)" -Level 'ERROR'
+                }
+            }
+            else {
+                $script:cntDirsSkipped++
+            }
+        }
+    }
+}
+#endregion
+
+#region ── Summary Report ─────────────────────────────────────────────────────
+$scriptDuration = (Get-Date) - $script:scriptStart
+
+Write-ColorOutput ''
+Write-ColorOutput ('─' * 70) -ForegroundColor Gray
+Write-ColorOutput '  CLEANUP SUMMARY' -ForegroundColor Cyan
+Write-ColorOutput ('─' * 70) -ForegroundColor Gray
+
+$summaryLines = @(
+    "  Files processed     : $($script:cntFiles)"
+    "  Directories removed : $($script:cntDirs)"
+    "  Items skipped       : $($script:cntSkipped + $script:cntDirsSkipped)"
+    "  Patterns excluded   : $($script:cntExcluded)"
+    "  Total space freed   : $(Format-FileSize -Bytes $script:totalBytes)"
+    "  Execution time      : $($scriptDuration.ToString('hh\:mm\:ss'))"
+    "  Mode                : $(if ($DryRun) { 'DRY RUN (no changes made)' } else { 'LIVE (changes applied)' })"
+)
+
+foreach ($line in $summaryLines) {
+    Write-ColorOutput $line -ForegroundColor Gray
+}
+
+Write-ColorOutput ('─' * 70) -ForegroundColor Gray
+Write-ColorOutput ''
+
+if ($script:LogPath) {
+    Write-ColorOutput "  Log file: $($script:LogPath)" -ForegroundColor Gray
+    Write-LogMessage "Cleanup complete: Files=$($script:cntFiles), Dirs=$($script:cntDirs), Bytes=$($script:totalBytes), Duration=$($scriptDuration)" -Level 'INFO'
+}
+
+Write-ColorOutput ''
+#endregion
