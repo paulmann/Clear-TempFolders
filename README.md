@@ -1,7 +1,6 @@
 # Clear-TempFolders
 
 [![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](https://github.com/paulmann/Clear-TempFolders)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![PowerShell](https://img.shields.io/badge/powershell-5.1%2B-blue.svg)](https://docs.microsoft.com/powershell/)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%2FServer-blue.svg)](https://www.microsoft.com/windows/)
 
